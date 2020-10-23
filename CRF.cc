@@ -775,7 +775,61 @@ namespace CRF
         system_rhs              = 0;
         preconditioner_matrix   = 0;
 
-        QGauss<dim> quadrature_formula(degree)
+        // FIXME: why is this degree + 2?
+        QGauss<dim> quadrature_formula(degree + 2);
+
+        FEValues<dim> fe_values(fe,
+                                quadrature_formula,
+                                update_values | update_quadrature_points |
+                                update_JxW_values | update_gradients);
+
+        const unsigned int dofs_per_cell = fe.dofs_per_cell;
+
+        const unsigned int n_q_points = quadrature_formula.size();
+
+        FullMatrix<double> local_matrix(dofs_per_cell, dofs_per_cell);
+        FullMatrix<double> local_preconditioner_matrix(dofs_per_cell,
+                                                       dofs_per_cell);
+        Vector<double>     local_rhs(dofs_per_cell);
+
+        std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+        // FIXME: Do I need to combine my multiple right hand sides above into one object?
+        const RightHandSide<dim>    right_hand_side;
+        std::vector<Vector<double>> rhs_values(n_q_points, Vector<double>(dim + 4));
+
+        // We need extractors for each block of solutions
+        const FEValuesExtractors::Vector velocities(0);
+        const FEValuesExtractors::Scalar pressure(dim);
+        const FEValuesExtractors::Scalar temperature(dim+1);
+        const FEValuesExtractors::Scalar chemical1(dim+2);
+        const FEValuesExtractors::Scalar chemical2(dim+3);
+
+        // FIXME: add description when I understand better
+        std::vector<SymmetricTensor<2, dim>> symgrad_phi_u(dofs_per_cell);
+        std::vector<double>                  div_phi_u(dofs_per_cell);
+        std::vector<double>                  phi_p(dofs_per_cell);
+
+        for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+            // initialize
+            fe_values.reinit(cell);
+            local_matrix                = 0;
+            local_preconditioner_matrix = 0;
+            local_rhs                   = 0;
+
+            // set up rhs
+            right_hand_side.vector_value_list(fe_values.get_quadrature_points(),
+                                              rhs_values);
+
+            for (unsigned int q = 0; q < n_q_points; ++q)
+                for (unsigned int k = 0; k < dofs_per_cell; ++k)
+                {
+                    symgrad_phi_u[k]    = fe_values[velocities].symmetric_gradient(k, q);
+                    div_phi_u[k]        = fe_values[velocities].divergence(k, q);
+                    phi_p[k]            = fe_values[pressure].value(k, q);
+                }
+        }
     }
 
 
