@@ -1,9 +1,10 @@
+
 ##
 #  CMake script for the step-9 tutorial program:
 ##
 
 # Set the name of the project and target:
-SET(TARGET "CRF")
+SET(TARGET "CRF-dumb")
 
 # Declare all source files the target consists of. Here, this is only
 # the one step-X.cc file, but as you expand your project you may wish
