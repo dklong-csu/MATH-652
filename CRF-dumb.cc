@@ -52,17 +52,6 @@
  * G_{X,i}  = (\beta\cdot n \phi_{X,i}, g_X)_{\partial\Omega inflow) --> X = g_X on \partial\Omega inflow
  */
 
-/*  TABLE OF CONTENTS
- *
- * (1) HEADER FILES
- * (2) CRF CLASS
- * (3) RIGHT HAND SIDE FUNCTION
- *
- *
- *
- *
- */
-
 
 
 /*
@@ -74,6 +63,8 @@
 #include <deal.II/base/logstream.h>
 #include <deal.II/base/function.h>
 #include <deal.II/base/utilities.h>
+#include <deal.II/base/timer.h>
+#include <deal.II/base/tensor_function.h>
 #include <deal.II/lac/block_vector.h>
 #include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/block_sparse_matrix.h>
@@ -118,10 +109,10 @@ namespace CRF
 
     // FIXME: Do I need to add rxns as a template parameter?
     template<int dim>
-    class CRF
+    class CRFProblem
     {
     public:
-        CRF(const unsigned int stokes_degree,
+        CRFProblem(const unsigned int stokes_degree,
             const unsigned int advect_degree);
 
         void run();
@@ -179,9 +170,49 @@ namespace CRF
         // The spatial coordinates we're evaluating at
         // An empty vector to store the result
         virtual void vector_value(const Point<dim> &p,
-                                  Vector<double> &value) const override;
+                                  Vector<double> &values) const override;
     };
 
+
+
+    /*
+     * ADVECTION FIELD -- Declaration
+     */
+
+    template <int dim>
+    class AdvectionField : public TensorFunction<1, dim>
+    {
+    public:
+        virtual Tensor<1, dim> value(const Point<dim> &p) const override;
+
+        DeclException2(ExcDimensionMismatch,
+                       unsigned int,
+                       unsigned int,
+                       << "The vector has size " << arg1 << " but should have "
+                       << arg2 << " elements.");
+    };
+
+
+
+    /*
+     * BOUNDARY VALUES -- Declaration
+     */
+
+    // FIXME: Make n_rxns template parameter?
+    template <int dim>
+    class BoundaryValues : public Function<dim>
+    {
+    public:
+        BoundaryValues()
+            : Function<dim>(dim + 1 + 1 + 2)
+        {}
+
+        virtual double value(const Point<dim> & p,
+                             const unsigned int component = 0) const override;
+
+        virtual void vector_value(const Point<dim> &p,
+                                  Vector<double> & values) const override;
+    };
 
 
     /*
@@ -192,7 +223,7 @@ namespace CRF
     // Constructor
     // FIXME: Hardcoded number of chemical species. Can I do: FE_Q<dim>(advect_degree), n_rxns?
     template<int dim>
-    CRF<dim>::CRF(const unsigned int stokes_degree,
+    CRFProblem<dim>::CRFProblem(const unsigned int stokes_degree,
                   const unsigned int advect_degree)
         : stokes_degree(stokes_degree)
         , advect_degree(advect_degree)
@@ -208,7 +239,7 @@ namespace CRF
 
 
     template<int dim>
-    void CRF<dim>::run()
+    void CRFProblem<dim>::run()
     {
         // Attach a grid to the triangulation
         {
@@ -256,7 +287,7 @@ namespace CRF
 
 
     template<int dim>
-    void CRF<dim>::setup_dofs()
+    void CRFProblem<dim>::setup_dofs()
     {
         dof_handler.distribute_dofs(fe);
         DoFRenumbering::Cuthill_McKee(dof_handler);
@@ -311,42 +342,7 @@ namespace CRF
 
             dsp.collect_sizes();
 
-            // FIXME: Hardcoded number of equations
-            Table<2, DoFTools::Coupling> coupling(dim+1+1+2, dim+1+1+2);
-            // Eq 0-(dim-1) -- u_{x_i}, p
-            // Eq dim -- u_{x_1},...,u_{x_dim}
-            // Eq dim+1 -- T
-            // Eq dim+2 -- S_1
-            // Eq dim+3 -- S_2
-            // ...
-            for (unsigned int row = 0; row < dim+1+1+2; ++row)
-                for(unsigned int col = 0; col < dim+1+1+2; ++col)
-                {
-                    if (row < dim)
-                    {
-                        if ((row == col)||(col==dim))
-                            coupling[row][col] = DoFTools::always;
-                        else
-                            coupling[row][col] = DoFTools::none;
-                    }
-                    else if (row == dim)
-                    {
-                        if (col < dim)
-                            coupling[row][col] = DoFTools::always;
-                        else
-                            coupling[row][col] = DoFTools::none;
-                    }
-                    else
-                    {
-                        if (col == row)
-                            coupling[row][col] = DoFTools::always;
-                        else
-                            coupling[row][col] = DoFTools::none;
-                    }
-                }
-
             DoFTools::make_sparsity_pattern(dof_handler,
-                                            coupling,
                                             dsp,
                                             constraints,
                                             false);
@@ -370,7 +366,7 @@ namespace CRF
 
 
     template<int dim>
-    void CRF<dim>::assemble_system()
+    void CRFProblem<dim>::assemble_system()
     {
         system_matrix   = 0;
         system_rhs      = 0;
@@ -388,17 +384,232 @@ namespace CRF
                                 update_values | update_quadrature_points |
                                 update_JxW_values | update_gradients);
 
+        // Boundary contributions from advection equations
+        // (\beta\cdot n \phi_X, \phi_X)
+        // n = update_normal_vectors
+        // \phi_X = update_values
+        FEFaceValues<dim> fe_face_values(fe,
+                                         QGauss<dim - 1>(advect_degree+1),
+                                         update_values | update_quadrature_points |
+                                         update_JxW_values | update_normal_vectors);
+
+        const unsigned int dofs_per_cell = fe.dofs_per_cell;
+
+        const unsigned int n_q_points = quadrature_formula.size();
+        const unsigned int n_face_q_points  = fe_face_values.get_quadrature().size();
+
+        FullMatrix<double>  local_matrix(dofs_per_cell, dofs_per_cell);
+
+        Vector<double>      local_rhs(dofs_per_cell);
+
+        std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+        const RightHandSide<dim>    right_hand_side;
+        std::vector<Vector<double>> rhs_values(n_q_points, Vector<double>(dim+4));
+
+        const BoundaryValues<dim>   boundary_value;
+        // FIXME: create vector to hold boundary values at each quadrature point??
+
+        AdvectionField<dim> advection_field;
+
+        // FIXME: Hardcoded number of chemicals
+        const FEValuesExtractors::Vector velocities(0);
+        const FEValuesExtractors::Scalar pressure(dim);
+        const FEValuesExtractors::Scalar temperature(dim+1);
+        const FEValuesExtractors::Scalar chemical1(dim+2);
+        const FEValuesExtractors::Scalar chemical2(dim+3);
+
+        std::vector<SymmetricTensor<2, dim>>    symgrad_phi_u(dofs_per_cell);
+        std::vector<double>                     div_phi_u(dofs_per_cell);
+        std::vector<double>                     phi_p(dofs_per_cell);
+        std::vector<Tensor<1, dim>>             grad_phi_T(dofs_per_cell);
+        std::vector<double>                     phi_T(dofs_per_cell);
+        // FIXME: Hardcoded number of chemicals
+        std::vector<Tensor<1, dim>>             grad_phi_s1(dofs_per_cell);
+        std::vector<double>                     phi_s1(dofs_per_cell);
+        std::vector<Tensor<1, dim>>             grad_phi_s2(dofs_per_cell);
+        std::vector<double>                     phi_s2(dofs_per_cell);
+
+        // Loop over all cells
+        for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+            fe_values.reinit(cell);
+            local_matrix    = 0;
+            local_rhs       = 0;
+
+            right_hand_side.vector_value_list(fe_values.get_quadrature_points(),
+                                              rhs_values);
+
+            // Calculate delta for streamline diffusion based off cell diameter
+            const double delta = 0.1 * cell->diameter();
+
+            // loop over all quadrature points
+            for (unsigned int q = 0; q < n_q_points; ++q) {
+                for (unsigned int k = 0; k < dofs_per_cell; ++k) {
+                    // We are populating a matrix with (phi_i, phi_j) where ( , ) describes
+                    // the complete bilinear form of our weak form.
+                    // Since we loop over i and then j, we can save computational energy by
+                    // precalculating all phi terms and then just call them within the loop.
+                    symgrad_phi_u[k] = fe_values[velocities].symmetric_gradient(k, q);
+                    div_phi_u[k] = fe_values[velocities].divergence(k, q);
+                    phi_p[k] = fe_values[pressure].value(k, q);
+                    grad_phi_T[k] = fe_values[temperature].gradient(k, q);
+                    // FIXME: Hardcoded number of chemicals
+                    grad_phi_s1[k] = fe_values[chemical1].gradient(k, q);
+                    phi_s1[k] = fe_values[chemical1].value(k, q);
+                    grad_phi_s2[k] = fe_values[chemical2].gradient(k, q);
+                    phi_s2[k] = fe_values[chemical2].value(k, q);
+                }
+
+                // Value of JxW for quadrature point
+                const double dx = fe_values.JxW(q);
+
+                // Evaluate advection field at quadrature point
+                const Tensor<1, dim> advection_direction = advection_field.value(fe_values.quadrature_point(q));
+
+                for (unsigned int i = 0; i < dofs_per_cell; ++i) {
+                    for (unsigned int j = 0; j < dofs_per_cell; ++j) {
+                        local_matrix(i, j) +=
+                                (
+                                        2 * (symgrad_phi_u[i] * symgrad_phi_u[j])
+                                        - div_phi_u[i] * phi_p[j]
+                                        - phi_p[i] * div_phi_u[j]
+                                        + (phi_T[i] + delta * (advection_direction * grad_phi_T[i])) *
+                                          (advection_direction * grad_phi_T[j])
+                                        + (phi_s1[i] + delta * (advection_direction * grad_phi_s1[i])) *
+                                          (advection_direction * grad_phi_s1[j])
+                                        + (phi_s2[i] + delta * (advection_direction * grad_phi_s2[i])) *
+                                          (advection_direction * grad_phi_s2[j])
+                                ) * dx;
+                    }
+
+                    // Shape functions are only non-zero in one component
+                    const unsigned int component_i = fe.system_to_component_index(i).first;
+                    local_rhs(i) += (fe_values.shape_value(i, q) * rhs_values[q](component_i)) * dx;
+                    //FIXME: Letting Neumann BC = 0 for now
+                }
+            }
+                // We now check to see if any face on the cell is on an inflow boundary.
+                // If so, the local matrix and rhs get contributions from the advection equations.
+                for (const auto &face : cell->face_iterators())
+                {
+                    if (face->at_boundary())
+                    {
+                        fe_face_values.reinit(cell, face);
+
+                        // Loop over quadrature points and see if each point is on inflow or outflow direction.
+                        // The scalar product between the advection direction and the normal direction should
+                        // be negative on the inflow boundary. This is because the normal direction points outside
+                        // the domain while the advection direction points inside.
+                        for (unsigned int q = 0; q < n_face_q_points; ++q)
+                        {
+                            // define variables to make things easier to read
+                            const Point<dim> q_point = fe_face_values.quadrature_point(q);
+                            const Tensor<1, dim> advection_direction = advection_field.value(q_point);
+                            const Tensor<1, dim> normal_vector       = fe_face_values.normal_vector(q);
+                            if (advection_direction * normal_vector < 0.)
+                            {
+                                // If the face is part of the inflow boundary, compute the contributions to the
+                                // local matrix and right hand side.
+                                const double dx = fe_face_values.JxW(q);
+
+                                for (unsigned int i = 0; i < dofs_per_cell; ++i)
+                                {
+                                    for (unsigned int j = 0; j < dofs_per_cell; ++j)
+                                    {
+                                        local_matrix(i, j) -=
+                                                (
+                                                    (advection_direction * normal_vector)
+                                                    * (
+                                                        phi_T[i] * phi_T[j]
+                                                        + phi_s1[i] * phi_s1[j]
+                                                        + phi_s2[i] * phi_s2[j]
+                                                    )
+                                                ) * dx;
+                                    }
+
+                                    // FIXME: Hardcoded boundary value component
+                                    // FIXME: Precalculate boundary values??
+                                    local_rhs(i) -=
+                                            (
+                                                    (advection_direction * normal_vector)
+                                                    * (
+                                                            phi_T[i] * boundary_value.value(q_point, dim + 1)
+                                                            + phi_s1[i] * boundary_value.value(q_point, dim + 2)
+                                                            + phi_s2[i] * boundary_value.value(q_point, dim + 3)
+                                                            )
+                                                    ) * dx;
+                                }
+                            }
+                        }
+
+                    }
+                }
+
+            // Now that all calculations for the cell are complete, update the global matrix
+            cell->get_dof_indices(local_dof_indices);
+            constraints.distribute_local_to_global(local_matrix,
+                                                   local_rhs,
+                                                   local_dof_indices,
+                                                   system_matrix,
+                                                   system_rhs);
+        }
     }
 
 
 
+    template <int dim>
+    void CRFProblem<dim>::solve()
+    {
+        // To keep things simple for the moment, we simply use a direct solver.
+        std::cout << "Solving linear system... ";
+        Timer timer;
+
+        SparseDirectUMFPACK A_direct;
+        A_direct.initialize(system_matrix);
+        A_direct.vmult(solution, system_rhs);
+
+        timer.stop();
+        std::cout << "done (" << timer.cpu_time() << "s)" << std::endl;
+    }
 
 
 
+    template <int dim>
+    void CRFProblem<dim>::output_results() const
+    {
+        // FIXME: hardcoded number of chemicals
+        std::vector<std::string> solution_names(dim, "velocity");
+        solution_names.emplace_back("pressure");
+        solution_names.emplace_back("temperature");
+        solution_names.emplace_back("chemical_1");
+        solution_names.emplace_back("chemical_2");
 
-    void solve();
+        std::vector<DataComponentInterpretation::DataComponentInterpretation>
+                data_component_interpretation(dim,
+                                              DataComponentInterpretation::component_is_part_of_vector);
+        // pressure
+        data_component_interpretation.push_back(DataComponentInterpretation::component_is_scalar);
+        // temperature
+        data_component_interpretation.push_back(DataComponentInterpretation::component_is_scalar);
+        // chemical species 1
+        data_component_interpretation.push_back(DataComponentInterpretation::component_is_scalar);
+        // chemical species 2
+        data_component_interpretation.push_back(DataComponentInterpretation::component_is_scalar);
 
-    void output_results() const;
+        DataOut<dim> data_out;
+        data_out.attach_dof_handler(dof_handler);
+        data_out.add_data_vector(solution,
+                                 solution_names,
+                                 DataOut<dim>::type_dof_data,
+                                 data_component_interpretation);
+        data_out.build_patches();
+
+        std::ofstream output("solution.vtk");
+        data_out.write_vtk(output);
+    }
+
+
 
     /*
      * RIGHT HAND SIDE FUNCTION -- Implementation
@@ -428,6 +639,110 @@ namespace CRF
         else
             return 0;
     }
+
+    // FIXME: Do I even need this?
+    template <int dim>
+    void RightHandSide<dim>::vector_value(const Point<dim> &p, Vector<double> &values) const
+    {
+        for (unsigned int c = 0; c < this->n_components; ++c)
+            values[c] = RightHandSide<dim>::value(p, c);
+    }
+
+
+    /*
+     * ADVECTION FIELD -- Implementation
+     */
+
+    template <int dim>
+    Tensor<1, dim> AdvectionField<dim>::value(const Point<dim> &p) const
+    {
+        Point<dim> value;
+        // FIXME: For now we just let the advection field be 1 in each direction
+        for (unsigned int i = 0; i < dim; ++i)
+            value[i] = 1;
+
+        return value;
+    }
+
+
+
+    /*
+     * BOUNDARY VALUES -- Implementation
+     */
+
+    template <int dim>
+    double BoundaryValues<dim>::value(const Point<dim> & p,
+                                      const unsigned int component) const
+    {
+        Assert(component < this->n_components,
+               ExcIndexRange(component, 0, this->n_components));
+
+        // velocities away from origin
+        if (component < dim)
+            return (p[component] < 0 ? -1 : (p[component] > 0 ? 1 : 0));
+        else if (component == dim)
+            return 0; // zero BC for pressure
+        else
+        {
+            // similar BC as in step-9
+            const double sine_term  = std::sin(16. * numbers::PI * p.norm_square());
+            const double weight     = std::exp(1. - p.norm_square());
+            return weight * sine_term;
+        }
+    }
+
+    // FIXME: Do I even need this??
+    template <int dim>
+    void BoundaryValues<dim>::vector_value(const Point<dim> &p, Vector<double> & values) const
+    {
+        for (unsigned int c = 0; c < this->n_components; ++c)
+            values[c] = BoundaryValues<dim>::value(p, c);
+    }
+}
+
+/*
+ * MAIN FUNCTION
+ */
+
+int main()
+{
+    try
+    {
+        using namespace CRF;
+
+        // 2D problem
+        // Stokes: Q2-Q1
+        // Advection: Q1
+        CRFProblem<2> crf_problem(1, 1);
+        crf_problem.run();
+    }
+    catch (std::exception &exc)
+    {
+        std::cerr << std::endl
+                  << std::endl
+                  << "------------------------------------------"
+                  << std::endl;
+        std::cerr << "Exception on processing: " << std::endl
+                  << exc.what() << std::endl
+                  << "Aborting!" << std::endl
+                  << "------------------------------------------"
+                  << std::endl;
+        return 1;
+    }
+    catch (...)
+    {
+        std::cerr << std::endl
+                  << std::endl
+                  << "------------------------------------------"
+                  << std::endl;
+        std::cerr << "Exception on processing: " << std::endl
+                  << "Aborting!" << std::endl
+                  << "------------------------------------------"
+                  << std::endl;
+        return 1;
+    }
+
+    return 0;
 }
 
 
