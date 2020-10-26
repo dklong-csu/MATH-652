@@ -450,15 +450,16 @@ namespace CRF
                     // the complete bilinear form of our weak form.
                     // Since we loop over i and then j, we can save computational energy by
                     // precalculating all phi terms and then just call them within the loop.
-                    symgrad_phi_u[k] = fe_values[velocities].symmetric_gradient(k, q);
-                    div_phi_u[k] = fe_values[velocities].divergence(k, q);
-                    phi_p[k] = fe_values[pressure].value(k, q);
-                    grad_phi_T[k] = fe_values[temperature].gradient(k, q);
+                    symgrad_phi_u[k]    = fe_values[velocities].symmetric_gradient(k, q);
+                    div_phi_u[k]        = fe_values[velocities].divergence(k, q);
+                    phi_p[k]            = fe_values[pressure].value(k, q);
+                    grad_phi_T[k]       = fe_values[temperature].gradient(k, q);
+                    phi_T[k]            = fe_values[temperature].value(k, q);
                     // FIXME: Hardcoded number of chemicals
-                    grad_phi_s1[k] = fe_values[chemical1].gradient(k, q);
-                    phi_s1[k] = fe_values[chemical1].value(k, q);
-                    grad_phi_s2[k] = fe_values[chemical2].gradient(k, q);
-                    phi_s2[k] = fe_values[chemical2].value(k, q);
+                    grad_phi_s1[k]      = fe_values[chemical1].gradient(k, q);
+                    phi_s1[k]           = fe_values[chemical1].value(k, q);
+                    grad_phi_s2[k]      = fe_values[chemical2].gradient(k, q);
+                    phi_s2[k]           = fe_values[chemical2].value(k, q);
                 }
 
                 // Value of JxW for quadrature point
