@@ -638,14 +638,7 @@ namespace CRF
         else if (component == dim+1)
             return 0.;
         else if (component == dim+2)
-        {
-            // FIXME: hardcoded for testing
-            const Point<2> center_point(0.0, -0.5);
-            if ((p - center_point).norm_square() < 0.25)
-                return 1.;
-            else
-                return 0.;
-        }
+            return 0.;
         else
             return 0.;
     }
@@ -715,7 +708,7 @@ namespace CRF
             // |________________|
             //
             if ( p[0] < .1 && p[0] > -0.1)
-                return 0.;
+                return 1.;
             else
                 return 0.;
 
