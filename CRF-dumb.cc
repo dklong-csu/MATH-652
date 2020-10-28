@@ -531,6 +531,8 @@ namespace CRF
 
                                     // FIXME: Hardcoded boundary value component
                                     // FIXME: Precalculate boundary values??
+                                    double test1 = advection_direction * normal_vector;
+                                    double test2 = boundary_value.value(q_point, dim + 1);
                                     local_rhs(i) -=
                                             (
                                                     (advection_direction * normal_vector)
@@ -630,15 +632,22 @@ namespace CRF
 
         // FIXME: For now, we just use zero rhs for simplicity
         if (component < dim)
-            return 0;
+            return 0.;
         else if (component == dim)
-            return 0;
+            return 0.;
         else if (component == dim+1)
-            return 0;
+            return 0.;
         else if (component == dim+2)
-            return 0;
+        {
+            // FIXME: hardcoded for testing
+            const Point<2> center_point(0.0, -0.5);
+            if ((p - center_point).norm_square() < 0.25)
+                return 1.;
+            else
+                return 0.;
+        }
         else
-            return 0;
+            return 0.;
     }
 
     // FIXME: Do I even need this?
@@ -658,9 +667,19 @@ namespace CRF
     Tensor<1, dim> AdvectionField<dim>::value(const Point<dim> &p) const
     {
         Point<dim> value;
-        // FIXME: For now we just let the advection field be 1 in each direction
-        for (unsigned int i = 0; i < dim; ++i)
-            value[i] = 1;
+        // FIXME: For now we just let the advection field be 1 in the y-direction
+        if (dim == 1)
+            value[0] = 1.;
+        else
+        {
+            for (unsigned int i = 0; i < dim; ++i)
+            {
+                if (i == 1)
+                    value[i] = 1.;
+                else
+                    value[i] = 0.;
+            }
+        }
 
         return value;
     }
@@ -682,13 +701,28 @@ namespace CRF
         if (component < dim)
             return (p[component] < 0 ? -1 : (p[component] > 0 ? 1 : 0));
         else if (component == dim)
-            return 0; // zero BC for pressure
+            return 0.; // zero BC for pressure
         else
         {
-            // similar BC as in step-9
-            const double sine_term  = std::sin(16. * numbers::PI * p.norm_square());
-            const double weight     = std::exp(1. - p.norm_square());
-            return weight * sine_term;
+            // Option 1 -- non-zero only on small part of boundary.
+            // Use this alongside no right hand side to check if value
+            // is advected along streamline only.
+            // Our domain is
+            //  ________________
+            // |                |
+            // |                |
+            // |                |
+            // |________________|
+            //
+            if ( p[0] < .1 && p[0] > -0.1)
+                return 0.;
+            else
+                return 0.;
+
+            // Option 2 -- zero along entire boundary.
+            // Use this alongside a right hand side to check if the source/sink
+            // within the domain interacts with streamline correctly.
+            // return 0.;
         }
     }
 
@@ -745,29 +779,3 @@ int main()
 
     return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
