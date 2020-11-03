@@ -68,6 +68,7 @@
 #include <deal.II/lac/block_vector.h>
 #include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/block_sparse_matrix.h>
+#include <deal.II/lac/block_sparsity_pattern.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/affine_constraints.h>
@@ -115,7 +116,7 @@ namespace CRF
         CRFProblem(const unsigned int stokes_degree,
             const unsigned int advect_degree);
 
-        void run();
+        void run(const unsigned int refinements);
 
     private:
         void setup_dofs();
@@ -124,7 +125,7 @@ namespace CRF
 
         void solve();
 
-        void output_results() const;
+        void output_results(const unsigned int cycle) const;
 
         const unsigned int stokes_degree;
         const unsigned int advect_degree;
@@ -239,7 +240,7 @@ namespace CRF
 
 
     template<int dim>
-    void CRFProblem<dim>::run()
+    void CRFProblem<dim>::run(const unsigned int refinements)
     {
         // Attach a grid to the triangulation
         {
@@ -267,21 +268,29 @@ namespace CRF
                     face->set_all_boundary_ids(1);
 
         // Refine globally prior to solving the problem
-        triangulation.refine_global(4 - dim);
+        triangulation.refine_global(3 - dim);
 
-        // Solve the problem
-        // FIXME: Once mesh refinement is added, wrap in a for loop over desired number of cycles
-        setup_dofs();
+        // solve over a few successively refined grids
+        for (unsigned int cycle = 0; cycle < refinements; ++cycle)
+        {
+            // Refine the grid for the new run
+            triangulation.refine_global(1);
 
-        std::cout << "Assembling..." << std::endl << std::flush;
-        assemble_system();
+            // Solve the problem
+            // FIXME: Once mesh refinement is added, wrap in a for loop over desired number of cycles
+            setup_dofs();
 
-        std::cout << "Solving..." << std::flush;
-        solve();
+            std::cout << "Assembling..." << std::endl << std::flush;
+            assemble_system();
 
-        output_results();
+            std::cout << "Solving..." << std::flush;
+            solve();
 
-        std::cout << std::endl;
+            output_results(cycle);
+
+            std::cout << std::endl;
+        }
+
     }
 
 
@@ -361,6 +370,10 @@ namespace CRF
         }
         solution.collect_sizes();
         system_rhs.collect_sizes();
+
+        // print sparsity pattern
+        std::ofstream out ("sparsity_pattern.plt");
+        sparsity_pattern.print_gnuplot(out);
     }
 
 
@@ -419,6 +432,7 @@ namespace CRF
         const FEValuesExtractors::Scalar chemical1(dim+2);
         const FEValuesExtractors::Scalar chemical2(dim+3);
 
+        std::vector<Tensor<1, dim>>             phi_u(dofs_per_cell);
         std::vector<SymmetricTensor<2, dim>>    symgrad_phi_u(dofs_per_cell);
         std::vector<double>                     div_phi_u(dofs_per_cell);
         std::vector<double>                     phi_p(dofs_per_cell);
@@ -430,6 +444,7 @@ namespace CRF
         std::vector<Tensor<1, dim>>             grad_phi_s2(dofs_per_cell);
         std::vector<double>                     phi_s2(dofs_per_cell);
 
+        std::ofstream log2 ("log_delta.txt");
         // Loop over all cells
         for (const auto &cell : dof_handler.active_cell_iterators())
         {
@@ -441,7 +456,9 @@ namespace CRF
                                               rhs_values);
 
             // Calculate delta for streamline diffusion based off cell diameter
-            const double delta = 0.1 * cell->diameter();
+            const double delta = 0.0 * cell->diameter();
+
+            log2 << delta << ' ' << cell->diameter() << std::endl;
 
             // loop over all quadrature points
             for (unsigned int q = 0; q < n_q_points; ++q) {
@@ -450,6 +467,7 @@ namespace CRF
                     // the complete bilinear form of our weak form.
                     // Since we loop over i and then j, we can save computational energy by
                     // precalculating all phi terms and then just call them within the loop.
+                    phi_u[k]            = fe_values[velocities].value(k,q);
                     symgrad_phi_u[k]    = fe_values[velocities].symmetric_gradient(k, q);
                     div_phi_u[k]        = fe_values[velocities].divergence(k, q);
                     phi_p[k]            = fe_values[pressure].value(k, q);
@@ -472,22 +490,28 @@ namespace CRF
                     for (unsigned int j = 0; j < dofs_per_cell; ++j) {
                         local_matrix(i, j) +=
                                 (
-                                        2 * (symgrad_phi_u[i] * symgrad_phi_u[j])
-                                        - div_phi_u[i] * phi_p[j]
-                                        - phi_p[i] * div_phi_u[j]
-                                        + (phi_T[i] + delta * (advection_direction * grad_phi_T[i])) *
-                                          (advection_direction * grad_phi_T[j])
-                                        + (phi_s1[i] + delta * (advection_direction * grad_phi_s1[i])) *
-                                          (advection_direction * grad_phi_s1[j])
-                                        + (phi_s2[i] + delta * (advection_direction * grad_phi_s2[i])) *
-                                          (advection_direction * grad_phi_s2[j])
+                                        2 * (symgrad_phi_u[i] * symgrad_phi_u[j])                           // stokes
+                                        - div_phi_u[i] * phi_p[j]                                           // stokes
+                                        - phi_p[i] * div_phi_u[j]                                           // stokes
+                                        + (phi_T[i] + delta * (advection_direction * grad_phi_T[i])) *      // advection
+                                          (advection_direction * grad_phi_T[j])                             // advection
+                                        + (phi_s1[i] + delta * (advection_direction * grad_phi_s1[i])) *    // advection
+                                          (advection_direction * grad_phi_s1[j])                            // advection
+                                        + (phi_s2[i] + delta * (advection_direction * grad_phi_s2[i])) *    // advection
+                                          (advection_direction * grad_phi_s2[j])                            // advection
                                 ) * dx;
                     }
 
                     // Shape functions are only non-zero in one component
                     const unsigned int component_i = fe.system_to_component_index(i).first;
-                    local_rhs(i) += (fe_values.shape_value(i, q) * rhs_values[q](component_i)) * dx;
-                    //FIXME: Letting Neumann BC = 0 for now
+                    // For the stokes problem, we use normal test functions
+                    if (component_i <= dim)
+                        local_rhs(i) += (fe_values.shape_value(i, q) * rhs_values[q](component_i)) * dx;
+                    // For the advection equations, we use streamline diffusion test functions
+                    else
+                        local_rhs(i) += (fe_values.shape_value(i, q)
+                                        + delta * advection_direction * fe_values.shape_grad(i, q)
+                                        ) * rhs_values[q](component_i) * dx;
                 }
             }
                 // We now check to see if any face on the cell is on an inflow boundary.
@@ -505,9 +529,10 @@ namespace CRF
                         for (unsigned int q = 0; q < n_face_q_points; ++q)
                         {
                             // define variables to make things easier to read
-                            const Point<dim> q_point = fe_face_values.quadrature_point(q);
-                            const Tensor<1, dim> advection_direction = advection_field.value(q_point);
-                            const Tensor<1, dim> normal_vector       = fe_face_values.normal_vector(q);
+                            const Point<dim> q_point                    = fe_face_values.quadrature_point(q);
+                            const Tensor<1, dim> advection_direction    = advection_field.value(q_point);
+                            const Tensor<1, dim> normal_vector          = fe_face_values.normal_vector(q);
+
                             if (advection_direction * normal_vector < 0.)
                             {
                                 // If the face is part of the inflow boundary, compute the contributions to the
@@ -531,8 +556,6 @@ namespace CRF
 
                                     // FIXME: Hardcoded boundary value component
                                     // FIXME: Precalculate boundary values??
-                                    double test1 = advection_direction * normal_vector;
-                                    double test2 = boundary_value.value(q_point, dim + 1);
                                     local_rhs(i) -=
                                             (
                                                     (advection_direction * normal_vector)
@@ -579,7 +602,7 @@ namespace CRF
 
 
     template <int dim>
-    void CRFProblem<dim>::output_results() const
+    void CRFProblem<dim>::output_results(const unsigned int cycle) const
     {
         // FIXME: hardcoded number of chemicals
         std::vector<std::string> solution_names(dim, "velocity");
@@ -608,7 +631,7 @@ namespace CRF
                                  data_component_interpretation);
         data_out.build_patches();
 
-        std::ofstream output("solution.vtk");
+        std::ofstream output("solution-" + Utilities::int_to_string(cycle, 2) + ".vtk");
         data_out.write_vtk(output);
     }
 
@@ -638,7 +661,15 @@ namespace CRF
         else if (component == dim+1)
             return 0.;
         else if (component == dim+2)
+        {
+            // option for rhs source
+            //if (p[0] < 0.25 && p[0] > -0.25 && p[1] < -0.25 && p[1] > -0.75)
+            //    return 1.;
+            //else
+            //    return 0.;
+            // option for no rhs
             return 0.;
+        }
         else
             return 0.;
     }
@@ -683,6 +714,8 @@ namespace CRF
      * BOUNDARY VALUES -- Implementation
      */
 
+    std::ofstream log ("log.txt");
+
     template <int dim>
     double BoundaryValues<dim>::value(const Point<dim> & p,
                                       const unsigned int component) const
@@ -691,8 +724,10 @@ namespace CRF
                ExcIndexRange(component, 0, this->n_components));
 
         // velocities away from origin
-        if (component < dim)
+        if (component < dim) {
+            //log << p << ' ' << (p[component] < 0 ? -1 : (p[component] > 0 ? 1 : 0)) << std::endl;
             return (p[component] < 0 ? -1 : (p[component] > 0 ? 1 : 0));
+        }
         else if (component == dim)
             return 0.; // zero BC for pressure
         else
@@ -707,10 +742,16 @@ namespace CRF
             // |                |
             // |________________|
             //
-            if ( p[0] < .1 && p[0] > -0.1)
+            if ( p[0] < .5 && p[0] > -0.5 && p[1] == -1.)
+            {
+                log << p << ' ' << 1 << std::endl;
                 return 1.;
+            }
             else
+            {
+                log << p << ' ' << 0 << std::endl;
                 return 0.;
+            }
 
             // Option 2 -- zero along entire boundary.
             // Use this alongside a right hand side to check if the source/sink
@@ -742,7 +783,7 @@ int main()
         // Stokes: Q2-Q1
         // Advection: Q1
         CRFProblem<2> crf_problem(1, 1);
-        crf_problem.run();
+        crf_problem.run(1);
     }
     catch (std::exception &exc)
     {
