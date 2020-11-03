@@ -458,8 +458,6 @@ namespace CRF
             // Calculate delta for streamline diffusion based off cell diameter
             const double delta = 0.0 * cell->diameter();
 
-            log2 << delta << ' ' << cell->diameter() << std::endl;
-
             // loop over all quadrature points
             for (unsigned int q = 0; q < n_q_points; ++q) {
                 for (unsigned int k = 0; k < dofs_per_cell; ++k) {
@@ -500,6 +498,7 @@ namespace CRF
                                         + (phi_s2[i] + delta * (advection_direction * grad_phi_s2[i])) *    // advection
                                           (advection_direction * grad_phi_s2[j])                            // advection
                                 ) * dx;
+                        log2 << delta << ' ' << cell->diameter() << std::endl;
                     }
 
                     // Shape functions are only non-zero in one component
@@ -512,6 +511,7 @@ namespace CRF
                         local_rhs(i) += (fe_values.shape_value(i, q)
                                         + delta * advection_direction * fe_values.shape_grad(i, q)
                                         ) * rhs_values[q](component_i) * dx;
+                    log2 << delta << ' ' << cell->diameter() << std::endl;
                 }
             }
                 // We now check to see if any face on the cell is on an inflow boundary.
