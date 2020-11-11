@@ -178,25 +178,6 @@ namespace CRF
 
 
     /*
-     * ADVECTION FIELD -- Declaration
-     */
-
-    template <int dim>
-    class AdvectionField : public TensorFunction<1, dim>
-    {
-    public:
-        virtual Tensor<1, dim> value(const Point<dim> &p) const override;
-
-        DeclException2(ExcDimensionMismatch,
-                       unsigned int,
-                       unsigned int,
-                       << "The vector has size " << arg1 << " but should have "
-                       << arg2 << " elements.");
-    };
-
-
-
-    /*
      * BOUNDARY VALUES -- Declaration
      */
 
@@ -391,8 +372,8 @@ namespace CRF
         previous_solution = 1;
 
         // print sparsity pattern
-        std::ofstream out ("sparsity_pattern.plt");
-        sparsity_pattern.print_gnuplot(out);
+        // std::ofstream out ("sparsity_pattern.plt");
+        // sparsity_pattern.print_gnuplot(out);
     }
 
 
@@ -690,7 +671,7 @@ namespace CRF
         else if (component == dim+2)
         {
             if (p[0] < 0.25 && p[0] > -0.25 && p[1] < -0.25 && p[1] > -0.75)
-                return 0.;
+                return 1.;
             else
                 return 0.;
         }
@@ -704,32 +685,6 @@ namespace CRF
     {
         for (unsigned int c = 0; c < this->n_components; ++c)
             values[c] = RightHandSide<dim>::value(p, c);
-    }
-
-
-    /*
-     * ADVECTION FIELD -- Implementation
-     */
-
-    template <int dim>
-    Tensor<1, dim> AdvectionField<dim>::value(const Point<dim> &p) const
-    {
-        Point<dim> value;
-        // FIXME: For now we just let the advection field be 1 in the y-direction
-        if (dim == 1)
-            value[0] = 1.;
-        else
-        {
-            for (unsigned int i = 0; i < dim; ++i)
-            {
-                if (i == 1)
-                    value[i] = 1.;
-                else
-                    value[i] = 0.;
-            }
-        }
-
-        return value;
     }
 
 
@@ -755,7 +710,7 @@ namespace CRF
         {
             if ( p[0] < .5 && p[0] > -0.5)
             {
-                return 1.;
+                return 0.;
             }
             else
             {
@@ -787,7 +742,7 @@ int main()
         // Stokes: Q2-Q1
         // Advection: Q1
         CRFProblem<2> crf_problem(1, 1);
-        crf_problem.run(3);
+        crf_problem.run(2);
     }
     catch (std::exception &exc)
     {
