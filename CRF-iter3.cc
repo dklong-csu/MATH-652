@@ -768,11 +768,64 @@ namespace CRF
   void CRFProblem<dim>::refine_mesh()
   {
     Vector<float> estimated_error_per_cell( triangulation.n_active_cells() );
+    // The Kelly error estimator tells us where interpolation error is high.
+    // This does not give an appropriate estimate of the actual error, but it gives a good indication
+    // of where the mesh should be refined. In order to take all equations into consideration, we need
+    // to normalize the Kelly error from each equation and add them together.
+    // Pressure error gives a good indication of velocity error in the Stokes equation, so we ignore velocity.
+    // All advection terms are calculated.
+    // The error from each equation is normalized by the L infinity norm of the error on each cell.
+    {
+      Vector<float> pressure_error_per_cell(triangulation.n_active_cells());
+      FEValuesExtractors::Scalar pressure(dim);
+      KellyErrorEstimator<dim>::estimate(dof_handler, QGauss<dim - 1>(stokes_degree + 1),
+                                         std::map<types::boundary_id, const Function<dim> *>(), solution,
+                                         pressure_error_per_cell, fe.component_mask(pressure));
 
-    FEValuesExtractors::Scalar pressure(dim);
-    KellyErrorEstimator<dim>::estimate(dof_handler, QGauss<dim - 1>(stokes_degree + 1),
-        std::map<types::boundary_id, const Function<dim> *>(), solution,
-        estimated_error_per_cell, fe.component_mask(pressure));
+      double max_error = pressure_error_per_cell.linfty_norm();
+      if (max_error == 0.)
+        max_error = 1.;
+
+      for (unsigned int cell = 0; cell < triangulation.n_active_cells(); ++cell)
+      {
+        estimated_error_per_cell[cell] += pressure_error_per_cell[cell]/max_error;
+      }
+    }
+
+    {
+      Vector<float> temperature_error_per_cell(triangulation.n_active_cells());
+      FEValuesExtractors::Scalar temperature(dim+1);
+      KellyErrorEstimator<dim>::estimate(dof_handler, QGauss<dim - 1>(stokes_degree + 1),
+                                         std::map<types::boundary_id, const Function<dim> *>(), solution,
+                                         temperature_error_per_cell, fe.component_mask(temperature));
+
+      double max_error = temperature_error_per_cell.linfty_norm();
+      if (max_error == 0.)
+        max_error = 1.;
+
+      for (unsigned int cell = 0; cell < triangulation.n_active_cells(); ++cell)
+      {
+        estimated_error_per_cell[cell] += temperature_error_per_cell[cell]/max_error;
+      }
+    }
+
+    for (unsigned int chem = 0; chem < n_rxns; ++chem)
+    {
+      Vector<float> chemical_error_per_cell(triangulation.n_active_cells());
+      FEValuesExtractors::Scalar chemical(dim+2+chem);
+      KellyErrorEstimator<dim>::estimate(dof_handler, QGauss<dim - 1>(stokes_degree + 1),
+                                         std::map<types::boundary_id, const Function<dim> *>(), solution,
+                                         chemical_error_per_cell, fe.component_mask(chemical));
+
+      double max_error = chemical_error_per_cell.linfty_norm();
+      if (max_error = 0.)
+        max_error = 1.;
+
+      for (unsigned int cell = 0; cell < triangulation.n_active_cells(); ++cell)
+      {
+        estimated_error_per_cell[cell] += chemical_error_per_cell[cell]/max_error;
+      }
+    }
 
     GridRefinement::refine_and_coarsen_fixed_number(triangulation, estimated_error_per_cell, 0.3, 0.0);
 
