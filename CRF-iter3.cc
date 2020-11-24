@@ -848,7 +848,7 @@ int main()
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         CRFProblem<2> crf_problem(1, 1, 3);
-        crf_problem.run(6);
+        crf_problem.run(2);
     }
     catch (std::exception &exc)
     {
