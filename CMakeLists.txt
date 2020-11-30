@@ -4,7 +4,7 @@
 ##
 
 # Set the name of the project and target:
-SET(TARGET "CRF-iter4")
+SET(TARGET "CRF")
 
 # Declare all source files the target consists of. Here, this is only
 # the one step-X.cc file, but as you expand your project you may wish

@@ -732,7 +732,7 @@ namespace CRF {
     preconditioner_A.initialize(system_matrix.block(0, 0), SparseILU<double>::AdditionalData());
 
     // FIXME: tolerance choice?
-    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-6);
+    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-16);
     SolverCG<Vector<double>> solver_A(solver_control_A);
 
     const auto op_A_inv = inverse_operator(op_A, solver_A, preconditioner_A);
@@ -742,8 +742,9 @@ namespace CRF {
 
     const auto schur_rhs = op_B * op_A_inv * F - G;
 
-    SolverControl solver_control_schur(P.size() * 10, 1.e-12);
-    SolverGMRES<Vector<double>> solver_schur(solver_control_schur);
+    SolverControl solver_control_schur(P.size() * 10, 1.e-6);
+    // FIXME: This is where I'm switching between CG and GMRES
+    SolverCG<Vector<double>> solver_schur(solver_control_schur);
 
     // Form the preconditioner for the Schur complement. This will be the inverse of the pressure mass matrix.
     auto &M = preconditioner_matrix.block(1,1);
@@ -757,7 +758,9 @@ namespace CRF {
 
     const auto schur_preconditioner = inverse_operator(op_M, solver_M, M_preconditioner);
 
-    const auto op_schur_inv = inverse_operator(op_schur, solver_schur, schur_preconditioner);
+    // FIXME: This is where I'm using PreconditionIdentity to check why CG is failing
+    const auto op_schur_inv = inverse_operator(op_schur, solver_schur, PreconditionIdentity());
+    //const auto op_schur_inv = inverse_operator(op_schur, solver_schur, schur_preconditioner);
 
     std::cout << "Solving for pressure..." << std::flush;
     P = op_schur_inv * schur_rhs;
@@ -777,7 +780,7 @@ namespace CRF {
               << std::endl << std::flush;
 
     // Solver for advection equations
-    SolverControl solver_control_advection(solution.block(2).size() * 10, 1.e-6);
+    SolverControl solver_control_advection(solution.block(2).size() * 1000, 1.e-6);
     SolverGMRES<Vector<double>> solver_advection(solver_control_advection);
 
     // Solve for temperature
@@ -942,7 +945,7 @@ int main()
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         CRFProblem<2> crf_problem(1, 1, 3);
-        crf_problem.run(4);
+        crf_problem.run(3);
     }
     catch (std::exception &exc)
     {
