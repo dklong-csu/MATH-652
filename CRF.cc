@@ -731,8 +731,8 @@ namespace CRF {
     SparseILU<double> preconditioner_A;
     preconditioner_A.initialize(system_matrix.block(0, 0), SparseILU<double>::AdditionalData());
 
-    // FIXME: tolerance choice?
-    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-16);
+    // FIXME: tolerance choice? 1.e-6 fails; 1e-12 passes first two refinement cycles
+    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-12);
     SolverCG<Vector<double>> solver_A(solver_control_A);
 
     const auto op_A_inv = inverse_operator(op_A, solver_A, preconditioner_A);
@@ -779,6 +779,14 @@ namespace CRF {
               << " iterations to obtain convergence."
               << std::endl << std::flush;
 
+    // Direct solve for advection for now since having issues with convergence
+    for (unsigned int i=2; i<6; ++i)
+    {
+      SparseDirectUMFPACK advection_direct;
+      advection_direct.initialize(system_matrix.block(i, i));
+      advection_direct.vmult(solution.block(i), system_rhs.block(i));
+    }
+    /*
     // Solver for advection equations
     SolverControl solver_control_advection(solution.block(2).size() * 1000, 1.e-6);
     SolverGMRES<Vector<double>> solver_advection(solver_control_advection);
@@ -821,7 +829,7 @@ namespace CRF {
       std::cout << solver_control_advection.last_step()
                 << " iterations to obtain convergence."
                 << std::endl << std::flush;
-    }
+      */
 
     timer.stop();
     std::cout << "done (" << timer.cpu_time() << "s)" << std::endl;
@@ -945,7 +953,7 @@ int main()
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         CRFProblem<2> crf_problem(1, 1, 3);
-        crf_problem.run(3);
+        crf_problem.run(4);
     }
     catch (std::exception &exc)
     {
