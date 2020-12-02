@@ -343,15 +343,29 @@ namespace CRF {
       setup_dofs();
 
       // Non-linear loop
-      for (unsigned int iter = 0; iter < 2; ++iter) {
-        std::cout << "Assembling iteration " << iter << "..." << std::endl << std::flush;
+      double residual = 1.;
+      unsigned int iteration_num = 0;
+      while (residual > 1e-3)
+      {
+        std::cout << "Fixed point iteration " << iteration_num << std::endl << std::flush;
+        std::cout << "Assembling..." << std::endl << std::flush;
         assemble_system();
 
-        std::cout << "Solving iteration " << iter << "..." << std::endl << std::flush;
+        std::cout << "Solving..." << std::endl << std::flush;
         solve();
         std::cout << std::endl;
 
+        BlockVector<double> diff = solution - previous_solution;
+        residual = 0.;
+        for (unsigned int i=0; i < dim + n_rxns + 1; ++i)
+        {
+          residual += diff.block(i).l2_norm()/previous_solution.block(i).l2_norm();
+        }
+
+        std::cout << "The residual between the previous and current solution is " << residual << std::endl << std::flush;
+
         previous_solution = solution;
+         iteration_num += 1;
       }
       output_results(cycle);
 
@@ -731,8 +745,8 @@ namespace CRF {
     SparseILU<double> preconditioner_A;
     preconditioner_A.initialize(system_matrix.block(0, 0), SparseILU<double>::AdditionalData());
 
-    // FIXME: tolerance choice?
-    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-6);
+    // FIXME: tolerance choice? 1.e-6 fails; 1e-12 passes first two refinement cycles
+    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-12);
     SolverCG<Vector<double>> solver_A(solver_control_A);
 
     const auto op_A_inv = inverse_operator(op_A, solver_A, preconditioner_A);
@@ -743,6 +757,7 @@ namespace CRF {
     const auto schur_rhs = op_B * op_A_inv * F - G;
 
     SolverControl solver_control_schur(P.size() * 10, 1.e-12);
+    // FIXME: This is where I'm switching between CG and GMRES
     SolverGMRES<Vector<double>> solver_schur(solver_control_schur);
 
     // Form the preconditioner for the Schur complement. This will be the inverse of the pressure mass matrix.
@@ -757,6 +772,8 @@ namespace CRF {
 
     const auto schur_preconditioner = inverse_operator(op_M, solver_M, M_preconditioner);
 
+    // FIXME: This is where I'm using PreconditionIdentity to check why CG is failing
+    //const auto op_schur_inv = inverse_operator(op_schur, solver_schur, PreconditionIdentity());
     const auto op_schur_inv = inverse_operator(op_schur, solver_schur, schur_preconditioner);
 
     std::cout << "Solving for pressure..." << std::flush;
@@ -776,49 +793,50 @@ namespace CRF {
               << " iterations to obtain convergence."
               << std::endl << std::flush;
 
+
     // Solver for advection equations
-    SolverControl solver_control_advection(solution.block(2).size() * 10, 1.e-6);
-    SolverGMRES<Vector<double>> solver_advection(solver_control_advection);
+    {
+      SolverControl solver_control_temp(solution.block(2).size() * 10, 1.e-6 * system_rhs.block(2).l2_norm());
+      SolverGMRES<Vector<double>> solver_temp(solver_control_temp);
 
-    // Solve for temperature
-    std::cout << "Solving for temperature..." << std::flush;
+      // Solve for temperature
+      std::cout << "Solving for temperature..." << std::flush;
 
-    // Create temperature preconditioner using SSOR
-    PreconditionSSOR<SparseMatrix<double> > precondition_temperature;
-    precondition_temperature.initialize(system_matrix.block(2, 2),
-                                        PreconditionSSOR<SparseMatrix<double>>::AdditionalData(0.6));
-
-    solver_advection.solve(system_matrix.block(2,2),
-                           solution.block(2),
-                           system_rhs.block(2),
-                           precondition_temperature);
-
-    std::cout << " done... ";
-
-    std::cout << solver_control_advection.last_step()
-              << " iterations to obtain convergence."
-              << std::endl << std::flush;
-
-    // Solve for chemical species
-    for (unsigned int chem = 0; chem < n_rxns; ++chem) {
-      std::cout << "Solving for chemical species " << chem << "..." << std::flush;
-
-      // Create a preconditioner using SSOR
-      PreconditionSSOR<SparseMatrix<double> > precondition_chemical;
-      precondition_chemical.initialize(system_matrix.block(3 + chem, 3 + chem),
-                                       PreconditionSSOR<SparseMatrix<double> >::AdditionalData(0.6));
-
-        solver_advection.solve(system_matrix.block(3+chem, 3+chem),
-                               solution.block(3+chem),
-                               system_rhs.block(3+chem),
-                               precondition_chemical);
+      solver_temp.solve(system_matrix.block(2, 2),
+                             solution.block(2),
+                             system_rhs.block(2),
+                             PreconditionIdentity());
 
       std::cout << " done... ";
 
-      std::cout << solver_control_advection.last_step()
+      std::cout << solver_control_temp.last_step()
                 << " iterations to obtain convergence."
                 << std::endl << std::flush;
     }
+
+    // Solve for chemical species
+    for (unsigned int chem = 0; chem < n_rxns; ++chem)
+    {
+      SolverControl solver_control_chem(solution.block(3+chem).size() * 10,
+                                        1.e-6 * system_rhs.block(3+chem).l2_norm());
+      SolverGMRES<Vector<double>> solver_chem(solver_control_chem);
+
+      std::cout << "Solving for chemical species " << chem << "..." << std::flush;
+
+      solver_chem.solve(system_matrix.block(3+chem, 3+chem),
+                        solution.block(3+chem),
+                        system_rhs.block(3+chem),
+                        PreconditionIdentity());
+
+      std::cout << " done... ";
+
+      std::cout << solver_control_chem.last_step()
+                << " iterations to obtain convergence."
+                << std::endl << std::flush;
+
+      }
+
+    constraints.distribute(solution);
 
     timer.stop();
     std::cout << "done (" << timer.cpu_time() << "s)" << std::endl;
@@ -942,7 +960,7 @@ int main()
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         CRFProblem<2> crf_problem(1, 1, 3);
-        crf_problem.run(4);
+        crf_problem.run(6);
     }
     catch (std::exception &exc)
     {
