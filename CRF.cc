@@ -249,7 +249,8 @@ namespace CRF {
   public:
     CRFProblem(const unsigned int stokes_degree,
                const unsigned int advect_degree,
-               const unsigned int n_rxns);
+               const unsigned int n_rxns,
+               const double viscosity);
 
     void run(const unsigned int refinements);
 
@@ -267,6 +268,7 @@ namespace CRF {
     const unsigned int stokes_degree;
     const unsigned int advect_degree;
     const unsigned int n_rxns;
+    const double viscosity;
 
     Triangulation<dim> triangulation;
     FESystem<dim> fe;
@@ -292,14 +294,16 @@ namespace CRF {
   template<int dim>
   CRFProblem<dim>::CRFProblem(const unsigned int stokes_degree,
                               const unsigned int advect_degree,
-                              const unsigned int n_rxns)
+                              const unsigned int n_rxns,
+                              const double viscosity)
       : stokes_degree(stokes_degree), advect_degree(advect_degree), n_rxns(n_rxns),
         triangulation(Triangulation<dim>::maximum_smoothing), fe(FE_Q<dim>(stokes_degree + 1) ^ dim,    // velocities
                                                                  FE_Q<dim>(stokes_degree),          // pressure
                                                                  FE_Q<dim>(advect_degree),          // temperature
-                                                                 FE_Q<dim>(advect_degree) ^
-                                                                 n_rxns)   // chemical concentrations
-      , dof_handler(triangulation) {}
+                                                                 FE_Q<dim>(advect_degree) ^n_rxns)   // chemical concentrations
+      , dof_handler(triangulation)
+      , viscosity(viscosity)
+  {}
 
 
   template<int dim>
@@ -605,11 +609,11 @@ namespace CRF {
             // contributions from stokes equations and temperature advection equation
             local_matrix(i, j) +=
                 (
-                    2 * (symgrad_phi_u[i] * symgrad_phi_u[j])                             // stokes
+                    2 * viscosity * (symgrad_phi_u[i] * symgrad_phi_u[j])                   // stokes
                     - div_phi_u[i] * phi_p[j]                                               // stokes
                     - phi_p[i] * div_phi_u[j]                                               // stokes
-                    + (phi_T[i] + delta * (advection_direction[q] * grad_phi_T[i])) *   // temperature
-                      (advection_direction[q] * grad_phi_T[j])                            // temperature
+                    + (phi_T[i] + delta * (advection_direction[q] * grad_phi_T[i])) *       // temperature
+                      (advection_direction[q] * grad_phi_T[j])                              // temperature
                 ) * dx;
 
             // Contributions to mass matrix preconditioner. We will only use the pressure mass matrix.
@@ -959,7 +963,8 @@ int main()
         // Stokes: Q2-Q1
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
-        CRFProblem<2> crf_problem(1, 1, 3);
+        // Viscosity of N2 = 1.66 according to Google (at 1.76 degree C, but ignore that for now)
+        CRFProblem<2> crf_problem(1, 1, 3, 1.66);
         crf_problem.run(6);
     }
     catch (std::exception &exc)
