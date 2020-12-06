@@ -78,7 +78,6 @@
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
-#include <deal.II/grid/tria_accessor.h>
 #include <deal.II/grid/tria_iterator.h>
 #include <deal.II/grid/grid_refinement.h>
 
@@ -99,9 +98,9 @@
 #include <deal.II/lac/sparse_ilu.h>
 
 // include standard library header files
+#include <cmath>
 #include <iostream>
 #include <fstream>
-//#include <memory>
 
 
 namespace CRF {
@@ -146,17 +145,11 @@ namespace CRF {
       return 0.; // zero BC for pressure
     else if (component == dim + 1) // temperature
     {
-      if (p[1] == -1.0) // prescribe BV at bottom of domain
-        return 293.0; // Room temperature in Kelvin
-      else
-        return 0.0;
+      return 293.; // prescribe room temperature in Kelvin
     }
-    else if (component == dim + 2 || component == dim + 3) // CH2O or OH
+    else if (component == dim + 2 || component == dim + 3) // CH2O and OH
     {
-      if (p[1] == -1.0)
-        return 1.0e-9;
-      else
-        return 0.;
+      return 1.e-15;
     }
     else // HCO or H2O
       return 0.;
@@ -300,7 +293,8 @@ namespace CRF {
         std::cout << "The residual between the previous and current solution is " << residual << std::endl << std::flush;
 
         previous_solution = solution;
-         iteration_num += 1;
+
+        iteration_num += 1;
       }
       output_results(cycle);
 
@@ -601,14 +595,8 @@ namespace CRF {
           {
             // FIXME: a bit hard-coded
             const double direction = (component_i < dim + 4) ? -1. : 1.;
-            const double rxn_rate = 7.82e7 * std::pow(std::abs(temp_vals[q]), 1.63) * std::exp(531. / temp_vals[q]);
-            const double rhs_val = direction * rxn_rate * CH2O_values[q] * OH_values[q];
-            if (isnan(rhs_val))
-            {
-              std::cout << "T^n = " << std::pow(temp_vals[q], 1.63)
-                        << ", exp(531/T) = " << std::exp(531 / temp_vals[q])
-                        << std::endl;
-            }
+            const double rxn_rate = 7.82e7 * std::pow(temp_vals[q], 1.63) * std::exp(531. / temp_vals[q]);
+            double rhs_val = direction * rxn_rate * CH2O_values[q] * OH_values[q];
 
             local_rhs(i) += ( fe_values.shape_value(i, q)
                             + delta * advection_direction[q] * fe_values.shape_grad(i, q) )
@@ -770,7 +758,7 @@ namespace CRF {
 
     // Solver for advection equations
     {
-      SolverControl solver_control_temp(solution.block(2).size() * 10, 1.e-6 * system_rhs.block(2).l2_norm());
+      SolverControl solver_control_temp(solution.block(2).size() * 10, 1.e-12 * system_rhs.block(2).l2_norm());
       SolverGMRES<Vector<double>> solver_temp(solver_control_temp);
 
       // Solve for temperature
@@ -791,7 +779,12 @@ namespace CRF {
     // Solve for chemical species
     for (unsigned int chem = 0; chem < n_rxns; ++chem)
     {
-      std::cout << "Chemcial " << chem << " rhs l2 norm = " << system_rhs.block(3+chem).l2_norm() << std::endl;
+      /*std::cout << "rhs values for chemical " << " chem:" << std::endl;
+      for (auto rh : system_rhs.block(3+chem))
+      {
+        std::cout << rh << ", ";
+      }*/
+      std::cout << std::endl;
       SolverControl solver_control_chem(solution.block(3+chem).size() * 10,
                                         1.e-6 * system_rhs.block(3+chem).l2_norm());
       SolverGMRES<Vector<double>> solver_chem(solver_control_chem);
@@ -935,7 +928,7 @@ int main()
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         // Viscosity of N2 = 1.66 according to Google (at 1.76 degree C, but ignore that for now)
         CRFProblem<2> crf_problem(1, 1, 4, 1.66);
-        crf_problem.run(3);
+        crf_problem.run(6);
     }
     catch (std::exception &exc)
     {
