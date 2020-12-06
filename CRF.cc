@@ -64,7 +64,6 @@
 #include <deal.II/base/function.h>
 #include <deal.II/base/utilities.h>
 #include <deal.II/base/timer.h>
-#include <deal.II/base/tensor_function.h>
 
 #include <deal.II/lac/block_vector.h>
 #include <deal.II/lac/full_matrix.h>
@@ -79,9 +78,7 @@
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
-#include <deal.II/grid/tria_accessor.h>
 #include <deal.II/grid/tria_iterator.h>
-#include <deal.II/grid/grid_tools.h>
 #include <deal.II/grid/grid_refinement.h>
 
 #include <deal.II/dofs/dof_handler.h>
@@ -101,93 +98,16 @@
 #include <deal.II/lac/sparse_ilu.h>
 
 // include standard library header files
+#include <cmath>
 #include <iostream>
 #include <fstream>
-//#include <memory>
 
 
 namespace CRF {
   using namespace dealii;
 
   /*
-    * DECLARATIONS AND IMPLEMENTATIONS
-    *
-    * 1. RightHandSide
-    * 2. BoundaryValues
-    * 3. CRFProblem
-    *
-  */
-
-
-
-  /*
-   * 1. RightHandSide
-   */
-
-  // Declaration
-
-  template<int dim>
-  class RightHandSide : public Function<dim> {
-  public:
-    // input = dim
-    // output = dim + 1 + 1 + rxns --> velocity + pressure + temperature + chemical species
-    RightHandSide(const unsigned int n_rxns)
-        : Function<dim>(dim + 1 + 1 + n_rxns) {}
-
-    // we need to write our own function for each component of the right hand side
-    // Inputs:
-    // The spatial coordinates we're evaluating at
-    // The component we want to evaluate
-    virtual double value(const Point<dim> &p,
-                         const unsigned int component = 0) const override;
-
-    // we need to write a custom function to output the entire vector
-    // Inputs:
-    // The spatial coordinates we're evaluating at
-    // An empty vector to store the result
-    virtual void vector_value(const Point<dim> &p,
-                              Vector<double> &values) const override;
-  };
-
-
-
-  // Implementation
-
-  template<int dim>
-  double RightHandSide<dim>::value(const Point<dim> &p, const unsigned int component) const {
-    Assert((component >= 0) && (component < this->n_components), ExcIndexRange(component, 0, this->n_components));
-    // component = 0-(dim-1)    --> f_a
-    // component = dim          --> f_b
-    // component = dim + 1      --> f_T
-    // component = dim + 2      --> f_1
-    // ...
-    // component = dim + m + 1  --> f_m
-
-    if (component < dim)
-      return 0.;
-    else if (component == dim)
-      return 0.;
-    else if (component == dim + 1)
-      return 1.;
-    else {
-      if (p[0] < 0.25 && p[0] > -0.25 && p[1] < -0.25 && p[1] > -0.75)
-        return 1.;
-      else
-        return 0.;
-    }
-  }
-
-
-  template<int dim>
-  void RightHandSide<dim>::vector_value(const Point<dim> &p, Vector<double> &values) const {
-    for (unsigned int c = 0; c < this->n_components; ++c)
-      values[c] = RightHandSide<dim>::value(p, c);
-  }
-
-
-
-  /*
-   * 2. BoundaryValues
+   * 1. BoundaryValues
    */
 
   // Declaration
@@ -195,14 +115,14 @@ namespace CRF {
   template<int dim>
   class BoundaryValues : public Function<dim> {
   public:
-    BoundaryValues(const unsigned int n_rxns)
+    explicit BoundaryValues(const unsigned int n_rxns)
         : Function<dim>(dim + 1 + 1 + n_rxns) {}
 
-    virtual double value(const Point<dim> &p,
-                         const unsigned int component = 0) const override;
+    double value(const Point<dim> &p,
+                 unsigned int component) const override;
 
-    virtual void vector_value(const Point<dim> &p,
-                              Vector<double> &values) const override;
+    void vector_value(const Point<dim> &p,
+                      Vector<double> &values) const override;
   };
 
 
@@ -211,22 +131,28 @@ namespace CRF {
 
   template<int dim>
   double BoundaryValues<dim>::value(const Point<dim> &p,
-                                    const unsigned int component) const {
+                                    const unsigned int component) const
+  {
     Assert(component < this->n_components,
            ExcIndexRange(component, 0, this->n_components));
 
     // velocities away from origin
-    if (component < dim) {
+    if (component < dim)
+    {
       return (p[component] < 0 ? -1 : (p[component] > 0 ? 1 : 0));
-    } else if (component == dim)
-      return 0.; // zero BC for pressure
-    else {
-      if (p[0] < .5 && p[0] > -0.5) {
-        return 0.;
-      } else {
-        return 0.;
-      }
     }
+    else if (component == dim)
+      return 0.; // zero BC for pressure
+    else if (component == dim + 1) // temperature
+    {
+      return 293.; // prescribe room temperature in Kelvin
+    }
+    else if (component == dim + 2 || component == dim + 3) // CH2O and OH
+    {
+      return 1.e-15;
+    }
+    else // HCO or H2O
+      return 0.;
   }
 
 
@@ -239,20 +165,19 @@ namespace CRF {
 
 
   /*
-   * 3. CRFProblem
+   * 2. CRFProblem
    */
-  // FIXME: add viscosity
   // Declaration
 
   template<int dim>
   class CRFProblem {
   public:
-    CRFProblem(const unsigned int stokes_degree,
-               const unsigned int advect_degree,
-               const unsigned int n_rxns,
-               const double viscosity);
+    CRFProblem(unsigned int stokes_degree,
+               unsigned int advect_degree,
+               unsigned int n_rxns,
+               double viscosity);
 
-    void run(const unsigned int refinements);
+    void run(unsigned int refinements);
 
   private:
     void setup_dofs();
@@ -263,7 +188,7 @@ namespace CRF {
 
     void refine_mesh();
 
-    void output_results(const unsigned int cycle) const;
+    void output_results(unsigned int cycle) const;
 
     const unsigned int stokes_degree;
     const unsigned int advect_degree;
@@ -296,13 +221,12 @@ namespace CRF {
                               const unsigned int advect_degree,
                               const unsigned int n_rxns,
                               const double viscosity)
-      : stokes_degree(stokes_degree), advect_degree(advect_degree), n_rxns(n_rxns),
+      : stokes_degree(stokes_degree), advect_degree(advect_degree), n_rxns(n_rxns), viscosity(viscosity),
         triangulation(Triangulation<dim>::maximum_smoothing), fe(FE_Q<dim>(stokes_degree + 1) ^ dim,    // velocities
                                                                  FE_Q<dim>(stokes_degree),          // pressure
                                                                  FE_Q<dim>(advect_degree),          // temperature
                                                                  FE_Q<dim>(advect_degree) ^n_rxns)   // chemical concentrations
       , dof_handler(triangulation)
-      , viscosity(viscosity)
   {}
 
 
@@ -369,7 +293,8 @@ namespace CRF {
         std::cout << "The residual between the previous and current solution is " << residual << std::endl << std::flush;
 
         previous_solution = solution;
-         iteration_num += 1;
+
+        iteration_num += 1;
       }
       output_results(cycle);
 
@@ -481,6 +406,11 @@ namespace CRF {
 
     // Before velocities are calculated, start with them at 1 in each direction.
     previous_solution = 1;
+    // Temperature of 1 Kelvin is physically unreasonable, so start it at room temperature
+    previous_solution.block(2) *= 293.;
+    // Set initial concentrations for CH2O and OH to be 0
+    previous_solution.block(3) = 0;
+    previous_solution.block(4) = 0;
   }
 
 
@@ -524,12 +454,12 @@ namespace CRF {
 
     std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
-    const RightHandSide<dim> right_hand_side(n_rxns);
-    std::vector<Vector<double>> rhs_values(n_q_points, Vector<double>(dim + 1 + 1 + n_rxns));
-
     const BoundaryValues<dim> boundary_value(n_rxns);
 
     std::vector<Tensor<1, dim>> advection_direction(n_q_points);
+    std::vector<double> temp_vals(n_q_points);
+    std::vector<double> CH2O_values(n_q_points);
+    std::vector<double> OH_values(n_q_points);
 
     const FEValuesExtractors::Vector velocities(0);
     const FEValuesExtractors::Scalar pressure(dim);
@@ -569,11 +499,38 @@ namespace CRF {
       local_preconditioner_matrix = 0;
       local_rhs = 0;
 
+      // Calculate advection based on previous velocity solutions
       fe_values[velocities].get_function_values(previous_solution,
                                                 advection_direction);
 
-      right_hand_side.vector_value_list(fe_values.get_quadrature_points(),
-                                        rhs_values);
+      // The only right hand side is from chemical reactions
+      // We model the reaction CH2O + OH -> HCO + H2O
+      // So the right hand sides are:
+      // CH2O: - (CH2O concentration) * (OH concentration) * k
+      // OH: - (CH2O concentration) * (OH concentration) * k
+      // HCO: (CH2O concentration) * (OH concentration) * k
+      // H2O: (CH2O concentration) * (OH concentration) * k
+      //
+      // k is the rate constant which determines the speed of the reaction.
+      // We calculate this with the modified Arrhenius equation k = A T^n exp(-E_a/[R*T])
+      // where
+      // A = pre-exponential factor with units cm^3/(mol*s*K^n).
+      // T^n = Temperature dependence of the pre-exponential factor with units K.
+      //    *note* the units of A are a bit odd, but it's based off the term A*T^n having units of cm^3/(mol*s).
+      // n = dimensionless constant representing the power of T the rate constant depends on.
+      // E_a = activation energy for the reaction with units J/mol.
+      // R = universal gas constant with units J/mol.
+      //
+      // For the reaction CH2O + OH -> HCO + H2O we have
+      // k = 7.82e7 * T^(1.63) * exp( 531 / T )
+      // source: https://web.stanford.edu/group/haiwanglab/FFCM1/pages/trialrates.html
+      fe_values[temperature].get_function_values(previous_solution,
+                                                 temp_vals);
+      fe_values[chemicals[0]].get_function_values(previous_solution,
+                                                  CH2O_values);
+      fe_values[chemicals[1]].get_function_values(previous_solution,
+                                                  OH_values);
+
 
       // Calculate delta for streamline diffusion based off cell diameter
       const double delta = 0.1 * cell->diameter();
@@ -630,16 +587,21 @@ namespace CRF {
 
           }
 
+
           // Shape functions are only non-zero in one component
           const unsigned int component_i = fe.system_to_component_index(i).first;
-          // For the stokes problem, we use normal test functions
-          if (component_i <= dim)
-            local_rhs(i) += (fe_values.shape_value(i, q) * rhs_values[q](component_i)) * dx;
-            // For the advection equations, we use streamline diffusion test functions
-          else
-            local_rhs(i) += (fe_values.shape_value(i, q)
-                             + delta * advection_direction[q] * fe_values.shape_grad(i, q)
-                            ) * rhs_values[q](component_i) * dx;
+          // The right hand side is only non-zero for the chemical species, so only calculate then
+          if (component_i > dim + 1)
+          {
+            // FIXME: a bit hard-coded
+            const double direction = (component_i < dim + 4) ? -1. : 1.;
+            const double rxn_rate = 7.82e7 * std::pow(temp_vals[q], 1.63) * std::exp(531. / temp_vals[q]);
+            double rhs_val = direction * rxn_rate * CH2O_values[q] * OH_values[q];
+
+            local_rhs(i) += ( fe_values.shape_value(i, q)
+                            + delta * advection_direction[q] * fe_values.shape_grad(i, q) )
+                            * rhs_val * dx;
+          }
         }
       }
 
@@ -749,8 +711,7 @@ namespace CRF {
     SparseILU<double> preconditioner_A;
     preconditioner_A.initialize(system_matrix.block(0, 0), SparseILU<double>::AdditionalData());
 
-    // FIXME: tolerance choice? 1.e-6 fails; 1e-12 passes first two refinement cycles
-    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-12);
+    SolverControl solver_control_A(solution.block(0).size() * 10, 1.e-6 * system_rhs.block(0).l2_norm());
     SolverCG<Vector<double>> solver_A(solver_control_A);
 
     const auto op_A_inv = inverse_operator(op_A, solver_A, preconditioner_A);
@@ -760,8 +721,7 @@ namespace CRF {
 
     const auto schur_rhs = op_B * op_A_inv * F - G;
 
-    SolverControl solver_control_schur(P.size() * 10, 1.e-12);
-    // FIXME: This is where I'm switching between CG and GMRES
+    SolverControl solver_control_schur(P.size() * 10, 1.e-12 * system_rhs.block(1).l2_norm());
     SolverGMRES<Vector<double>> solver_schur(solver_control_schur);
 
     // Form the preconditioner for the Schur complement. This will be the inverse of the pressure mass matrix.
@@ -771,13 +731,11 @@ namespace CRF {
     SparseILU<double> M_preconditioner;
     M_preconditioner.initialize(M, SparseILU<double>::AdditionalData());
 
-    SolverControl solver_control_M(solution.block(1).size(), 1.e-6);
+    SolverControl solver_control_M(solution.block(1).size(), 1.e-6 * system_rhs.block(1).l2_norm());
     SolverCG<Vector<double>> solver_M(solver_control_M);
 
     const auto schur_preconditioner = inverse_operator(op_M, solver_M, M_preconditioner);
 
-    // FIXME: This is where I'm using PreconditionIdentity to check why CG is failing
-    //const auto op_schur_inv = inverse_operator(op_schur, solver_schur, PreconditionIdentity());
     const auto op_schur_inv = inverse_operator(op_schur, solver_schur, schur_preconditioner);
 
     std::cout << "Solving for pressure..." << std::flush;
@@ -800,7 +758,7 @@ namespace CRF {
 
     // Solver for advection equations
     {
-      SolverControl solver_control_temp(solution.block(2).size() * 10, 1.e-6 * system_rhs.block(2).l2_norm());
+      SolverControl solver_control_temp(solution.block(2).size() * 10, 1.e-12 * system_rhs.block(2).l2_norm());
       SolverGMRES<Vector<double>> solver_temp(solver_control_temp);
 
       // Solve for temperature
@@ -821,6 +779,12 @@ namespace CRF {
     // Solve for chemical species
     for (unsigned int chem = 0; chem < n_rxns; ++chem)
     {
+      /*std::cout << "rhs values for chemical " << " chem:" << std::endl;
+      for (auto rh : system_rhs.block(3+chem))
+      {
+        std::cout << rh << ", ";
+      }*/
+      std::cout << std::endl;
       SolverControl solver_control_chem(solution.block(3+chem).size() * 10,
                                         1.e-6 * system_rhs.block(3+chem).l2_norm());
       SolverGMRES<Vector<double>> solver_chem(solver_control_chem);
@@ -837,7 +801,6 @@ namespace CRF {
       std::cout << solver_control_chem.last_step()
                 << " iterations to obtain convergence."
                 << std::endl << std::flush;
-
       }
 
     constraints.distribute(solution);
@@ -964,7 +927,7 @@ int main()
         // Advection: Q1
         // Chemical reaction: 2H_2 + O_2 -> 2H_2O
         // Viscosity of N2 = 1.66 according to Google (at 1.76 degree C, but ignore that for now)
-        CRFProblem<2> crf_problem(1, 1, 3, 1.66);
+        CRFProblem<2> crf_problem(1, 1, 4, 1.66);
         crf_problem.run(6);
     }
     catch (std::exception &exc)
