@@ -10,10 +10,10 @@
  * Our PDEs in their strong form are
  * -2 \mu div( \epsilon(u) ) + grad( p ) = f_a  (1)
  * - div( u )                            = f_b  (2)
- * \beta \cdot grad( T )                 = f_T  (3)
- * \beta \cdot grad( s_1 )               = f_1  (4)
+ * u \cdot grad( T )                 = f_T  (3)
+ * u \cdot grad( s_1 )               = f_1  (4)
  * ...
- * \beta \cdot grad( s_m )               = f_m  (5)
+ * u \cdot grad( s_m )               = f_m  (5)
  *
  * where we need to solve for:
  * u = velocities (vector) (e.g. (u_x, u_y, u_z) for 3D)
@@ -24,7 +24,6 @@
  *
  * and we know:
  * \mu = viscosity of the gas
- * \beta = wind field acting on the gas -- this should be u, but we define a known wind field as a simplification for the moment.
  * \epsilon = symmetric gradient -- i.e. 1/2(grad( u ) + [grad( u )]^T)
  * along with associated boundary conditions which will be discussed later.
  *
@@ -106,11 +105,9 @@
 namespace CRF {
   using namespace dealii;
 
-  /*
-   * 1. BoundaryValues
-   */
-
-  // Declaration
+  // A class representing the function that defines the boundary conditions for the problem.
+  // The function is vector-valued, so we need to encode how each component of the vector-valued
+  // boundary value is calculated.
 
   template<int dim>
   class BoundaryValues : public Function<dim> {
@@ -127,7 +124,14 @@ namespace CRF {
 
 
 
-  // Implementation
+  // For velocity, the boundary values will have the velocity flow away from the origin.
+  // For pressure, no boundary values are explicitly created.
+  // Natural Neumann boundary conditions are also posed for the Stokes problem. That is,
+  // we have n \cdot [p\boldsymbol{I} - 2\epsilon(u)] = 0.
+  // For temperature, we have the inflow boundary has Dirichlet BC of room temperature, 293 K.
+  // For the chemical species, the two reactants, CH20 and OH, have separate trigonometric
+  // curves defining their Dirichlet BCs on the inflow boundary. These curves are scaled down
+  // to be on the order of 10^{-15}. The two products, HCO and H2O, are prescribed to be zero on the inflow boundary.
 
   template<int dim>
   double BoundaryValues<dim>::value(const Point<dim> &p,
@@ -147,9 +151,13 @@ namespace CRF {
     {
       return 293.; // prescribe room temperature in Kelvin
     }
-    else if (component == dim + 2 || component == dim + 3) // CH2O and OH
+    else if (component == dim + 2) // CH2O
     {
-      return 1.e-15;
+      return 1.e-15*(2 + std::sin(p[0]));
+    }
+    else if (component == dim + 3) // OH
+    {
+      return 1.e-15*(2 + std::cos(p[0]));
     }
     else // HCO or H2O
       return 0.;
@@ -164,10 +172,14 @@ namespace CRF {
 
 
 
-  /*
-   * 2. CRFProblem
-   */
-  // Declaration
+  // This class holds the necessary procedures to set up and solve the equations described in the introduction.
+  // Namely, it defines how to discretize the domain and setup the degrees of freedom for the linear system -- setup_dofs.
+  // Then this class describes how to populate the matrix and right hand side vector corresponding to the linear system -- assemble_system.
+  // Next, the procedure to solve the linear system is implemented -- solve.
+  // After solving the system, areas with high error are identified and mesh refinement is conducted -- refine_mesh.
+  // Finally, the solution vector is output for visualization -- output_results.
+  // The run method is set up to proceed in the order described above with a loop which repeats the process
+  // for a specified number of mesh refinements.
 
   template<int dim>
   class CRFProblem {
@@ -214,7 +226,15 @@ namespace CRF {
 
 
 
-  // Implementation
+  // When we create an object, we want to describe what kind of finite elements we wish to use.
+  // This is accomplished with stokes_degree and advect_degree. In particular, in order to satisfy
+  // the inf-sup condition for the Stokes equations, velocity will use (stokes_degree+1) degree polynomials
+  // while pressure will use (stokes_degree) degree polynomials.
+  // We also need to say how many chemicals we are keeping track of so that we create an appropriate number
+  // of finite elements for these state variables. This is accomplished with n_rxns.
+  // Finally, the viscosity is specified.
+  // With this information, appropriate variables are initialized, including the triangulation, finite element,
+  // and degrees of freedom handler.
 
   template<int dim>
   CRFProblem<dim>::CRFProblem(const unsigned int stokes_degree,
@@ -229,6 +249,20 @@ namespace CRF {
       , dof_handler(triangulation)
   {}
 
+  // This functions is essentially the master function that proceeds through the solution process.
+  // It starts by creating a simple, coarse mesh on a (dim)-D rectangle.
+  // Then the Dirichlet boundary for the Stokes equations is set by marking any face whose last component
+  // is equal to zero, hence making the top of the rectangle the Dirichlet boundary.
+  // Then the solution process is as follows
+  // (1) if it's not the first iteration, refine the mesh.
+  // (2) set up the degrees of freedom for the newly refined mesh.
+  // (3) enter a nonlinear loop -- a Picard iteration in this case.
+  // (3a) assemble the system matrix and right hand side for the current nonlinear iteration
+  //      using the previous solution to account for the nonlinear parts.
+  // (3b) solve for the solution of the current nonlinear iteration.
+  // (3c) check for the residual and either repeat (3a)-(3c) or exit the nonlinear loop.
+  // (4) output the results.
+  // (5) repeat from (1) until the number of specified mesh refinements has occurred.
 
   template<int dim>
   void CRFProblem<dim>::run(const unsigned int refinements) {
@@ -303,6 +337,23 @@ namespace CRF {
   }
 
 
+  // For a given triangulation, we want to order the degrees of freedom nicely in order to reduce bandwidth and to
+  // make it easier for the ILU preconditioner used in the Stokes problem to be closer to the real LU decomposition.
+  // The Cuthill_McKee ordering is used, as suggested by step-22. Afterwards, we want to solve our equations
+  // using the block pattern that naturally arises from the weak solution. To this end we specify the velocities
+  // into one block, the pressure into a second, the temperature into a third, the first chemical into a fourth,
+  // and so on. Then using the component-wise re-ordering retains the Cuthill-McKee structure for an individual
+  // block, but makes sure the blocks are stacked as we expect.
+  //
+  // Following the DoF ordering, we apply the Dirichlet boundary conditions for velocity through
+  // interpolate_boundary_values, using a component_mask to ensure BCs are only applied for velocity.
+  //
+  // Next, we allocate the sparsity patterns describing the system matrix and another one for a preconditioner.
+  // Since we will use the pressure mass matrix as a preconditioner later on, it is convenient to set up this
+  // matrix in a similar fashion as the system matrix so that we can populate it during the assembly step.
+  //
+  // Finally we make sure all of our matrices and vectors are initialized to the correct sizes. We also set up
+  // an "initial guess" for the solution to be used in the nonlinear loop.
   template<int dim>
   void CRFProblem<dim>::setup_dofs() {
     system_matrix.clear();
@@ -414,13 +465,41 @@ namespace CRF {
   }
 
 
+  // This function is used to populate the system matrix, right hand side vector, and the pressure mass
+  // matrix preconditioner. Recall, we have the bilinear form creating the system matrix
+  // A_{ij} = 2 \mu (\epsilon(\phi_{i,u}), \epsilon(\phi_{j,u}) - (div \phi_{i,u}, \phi_{j,p})
+  // - (\phi_{i,p}, div \phi_{j,u})
+  // + (\phi_{i,T} + \delta u \cdot \nabla \phi_{i,T}, u \cdot \nabla \phi_{j,T}) - (u \cdot \boldsymbol{n} \phi_{i,T}, \phi_{j,T})_\Gamma
+  // + (\phi_{i,r1} + \delta u \cdot \nabla \phi_{i,r1}, u \cdot \nabla \phi_{j,r1}) - (u \cdot \boldsymbol{n} \phi_{i,r1}, \phi_{j,r1})_\Gamma
+  // + (\phi_{i,r2} + \delta u \cdot \nabla \phi_{i,r2}, u \cdot \nabla \phi_{j,r2}) - (u \cdot \boldsymbol{n} \phi_{i,r2}, \phi_{j,r2})_\Gamma
+  // + (\phi_{i,p1} + \delta u \cdot \nabla \phi_{i,p1}, u \cdot \nabla \phi_{j,p1}) - (u \cdot \boldsymbol{n} \phi_{i,p1}, \phi_{j,p1})_\Gamma
+  // + (\phi_{i,p2} + \delta u \cdot \nabla \phi_{i,p2}, u \cdot \nabla \phi_{j,p2}) - (u \cdot \boldsymbol{n} \phi_{i,p2}, \phi_{j,p2})_\Gamma
+  //
+  // where ( , )_\Gamma indicates an integral on the inflow boundary and ( , ) is an integral on the inside of the domain.
+  // The right hand side is
+  // rhs_{ij} = (\phi_{i,T} + \delta u \cdot \nabla \phi_{i,T}, f_{T})
+  // + (\phi_{i,r1} + \delta u \cdot \nabla \phi_{i,r1}, f_{r1})
+  // + (\phi_{i,r2} + \delta u \cdot \nabla \phi_{i,r2}, f_{r2})
+  // + (\phi_{i,p1} + \delta u \cdot \nabla \phi_{i,p1}, f_{p1})
+  // + (\phi_{i,p2} + \delta u \cdot \nabla \phi_{i,p2}, f_{p2})
+  //
+  // where f_{(r/p)(1/2)} = +- k [CH2O][OH]
+  // and f_{T} = k [CH2O][OH] q_0/(\rho c_p)
+  //
+  // This function sets up an iteration over all cells and all faces. For the iteration over all cells, to save
+  // computational energy, each ( , ) term is precalculated for all quadrature points since duplicate computations
+  // would be needed if the matrix was computed entirely within the quadrature double loop. For the iteration over
+  // all faces, the face is first checked to see if it's on the boundary. Then the face is checked to see if it is
+  // on the inflow boundary by computing the dot product between the normal vector to the face and the velocity there.
+  // Since the normal vector points out of the domain, if the dot product is negative, then the velocity must point
+  // inside the domain, which would make that face an inflow boundary.
+
   template<int dim>
   void CRFProblem<dim>::assemble_system() {
     system_matrix = 0;
     system_rhs = 0;
     preconditioner_matrix = 0;
 
-    // FIXME: why degree+2?
     QGauss<dim> quadrature_formula(stokes_degree + 2);
 
     // Values needed inside domain:
@@ -464,7 +543,7 @@ namespace CRF {
     const FEValuesExtractors::Vector velocities(0);
     const FEValuesExtractors::Scalar pressure(dim);
     const FEValuesExtractors::Scalar temperature(dim + 1);
-    // FIXME: Is this the proper way to do this?
+
     std::vector<FEValuesExtractors::Scalar> chemicals(n_rxns);
     for (unsigned int chem = 0; chem < n_rxns; ++chem) {
       const FEValuesExtractors::Scalar new_chemical(dim + 2 + chem);
@@ -503,27 +582,7 @@ namespace CRF {
       fe_values[velocities].get_function_values(previous_solution,
                                                 advection_direction);
 
-      // The only right hand side is from chemical reactions
-      // We model the reaction CH2O + OH -> HCO + H2O
-      // So the right hand sides are:
-      // CH2O: - (CH2O concentration) * (OH concentration) * k
-      // OH: - (CH2O concentration) * (OH concentration) * k
-      // HCO: (CH2O concentration) * (OH concentration) * k
-      // H2O: (CH2O concentration) * (OH concentration) * k
-      //
-      // k is the rate constant which determines the speed of the reaction.
-      // We calculate this with the modified Arrhenius equation k = A T^n exp(-E_a/[R*T])
-      // where
-      // A = pre-exponential factor with units cm^3/(mol*s*K^n).
-      // T^n = Temperature dependence of the pre-exponential factor with units K.
-      //    *note* the units of A are a bit odd, but it's based off the term A*T^n having units of cm^3/(mol*s).
-      // n = dimensionless constant representing the power of T the rate constant depends on.
-      // E_a = activation energy for the reaction with units J/mol.
-      // R = universal gas constant with units J/mol.
-      //
-      // For the reaction CH2O + OH -> HCO + H2O we have
-      // k = 7.82e7 * T^(1.63) * exp( 531 / T )
-      // source: https://web.stanford.edu/group/haiwanglab/FFCM1/pages/trialrates.html
+      // The only right hand side is from chemical reactions so some relevant values are needed
       fe_values[temperature].get_function_values(previous_solution,
                                                  temp_vals);
       fe_values[chemicals[0]].get_function_values(previous_solution,
@@ -541,7 +600,7 @@ namespace CRF {
           // We are populating a matrix with (phi_i, phi_j) where ( , ) describes
           // the complete bilinear form of our weak form.
           // Since we loop over i and then j, we can save computational energy by
-          // precalculating all phi terms and then just call them within the loop.
+          // precalculating all phi terms and then just access them within the loop.
           phi_u[k] = fe_values[velocities].value(k, q);
           symgrad_phi_u[k] = fe_values[velocities].symmetric_gradient(k, q);
           div_phi_u[k] = fe_values[velocities].divergence(k, q);
@@ -551,7 +610,6 @@ namespace CRF {
           grad_phi_T[k] = fe_values[temperature].gradient(k, q);
           phi_T[k] = fe_values[temperature].value(k, q);
 
-          // FIXME: Is this the way to do things?
           for (unsigned int chem = 0; chem < n_rxns; ++chem) {
             phi_chem[chem][k] = fe_values[chemicals[chem]].value(k, q);
             grad_phi_chem[chem][k] = fe_values[chemicals[chem]].gradient(k, q);
@@ -590,16 +648,47 @@ namespace CRF {
 
           // Shape functions are only non-zero in one component
           const unsigned int component_i = fe.system_to_component_index(i).first;
-          // The right hand side is only non-zero for the chemical species, so only calculate then
+          // The right hand side is only non-zero for the chemical species
+          // We model the reaction CH2O + OH -> HCO + H2O
+          // So the right hand sides are:
+          // CH2O: - (CH2O concentration) * (OH concentration) * k
+          // OH: - (CH2O concentration) * (OH concentration) * k
+          // HCO: (CH2O concentration) * (OH concentration) * k
+          // H2O: (CH2O concentration) * (OH concentration) * k
+          //
+          // k is the rate constant which determines the speed of the reaction.
+          // We calculate this with the modified Arrhenius equation k = A T^n exp(-E_a/[R*T])
+          // where
+          // A = pre-exponential factor with units cm^3/(mol*s*K^n).
+          // T^n = Temperature dependence of the pre-exponential factor with units K.
+          //    *note* the units of A are a bit odd, but it's based off the term A*T^n having units of cm^3/(mol*s).
+          // n = dimensionless constant representing the power of T the rate constant depends on.
+          // E_a = activation energy for the reaction with units J/mol.
+          // R = universal gas constant with units J/mol.
+          //
+          // For the reaction CH2O + OH -> HCO + H2O we have
+          // k = 7.82e7 * T^(1.63) * exp( 531 / T )
+          // source: https://web.stanford.edu/group/haiwanglab/FFCM1/pages/trialrates.html
           if (component_i > dim + 1)
           {
-            // FIXME: a bit hard-coded
             const double direction = (component_i < dim + 4) ? -1. : 1.;
             const double rxn_rate = 7.82e7 * std::pow(temp_vals[q], 1.63) * std::exp(531. / temp_vals[q]);
-            double rhs_val = direction * rxn_rate * CH2O_values[q] * OH_values[q];
+            const double rhs_val = direction * rxn_rate * CH2O_values[q] * OH_values[q];
 
             local_rhs(i) += ( fe_values.shape_value(i, q)
                             + delta * advection_direction[q] * fe_values.shape_grad(i, q) )
+                            * rhs_val * dx;
+          }
+          else if (component_i == dim + 1) // Temperature change due to chemical reaction
+          {
+            const double rxn_rate = 7.82e7 * std::pow(temp_vals[q], 1.63) * std::exp(531. / temp_vals[q]);
+            const double n2_density = 1.2506; // pretending density doesn't change with temperature
+            const double n2_specific_heat = 1.04;
+            const double rxn_heat_production = 1.e17; // completely made up number
+            const double rhs_val = (rxn_heat_production * rxn_rate * CH2O_values[q] * OH_values[q]) / (n2_density * n2_specific_heat);
+
+            local_rhs(i) += ( fe_values.shape_value(i, q)
+                              + delta * advection_direction[q] * fe_values.shape_grad(i, q) )
                             * rhs_val * dx;
           }
         }
@@ -688,6 +777,15 @@ namespace CRF {
    * First, we solve for U and P (the Stokes part of the problem) by using a Schur Complement approach
    *    B A^-1 B^T P = B A^-1 F - G --> Solve for P
    *    A U = F - B^T P ---> Solve for U
+   * To precondition for A^-1, we used an incomplete LU decomposition (ILU) and to precondition the entire
+   * Schur matrix (B A^-1 B^T) we use the pressure mass matrix, which uses ILU to precondition as well.
+   *
+   * Then solving for T, S_* is pretty straightforward
+   *    T,S_* = C_*^-1 F_*
+   * We use no preconditioner at the moment. We observed that SSOR proved to be a poor preconditioner as the mesh
+   * started to refine (even so early as the 3rd or 4th cycle). The likely optimal preconditioner is to order the
+   * degrees of freedom in the positive x-direction and perform a Gauss-Seidel iteration. Then repeat this for the
+   * negative x-direction, positive y-direction, etc. There was not enough time to implement this.
    */
   template<int dim>
   void CRFProblem<dim>::solve() {
@@ -810,7 +908,8 @@ namespace CRF {
   }
 
 
-  // FIXME: make chemical names an input for a nicer output
+  // A standard function to output the solution variables in .vtk format so we can visualize in software
+  // such as Visit.
   template<int dim>
   void CRFProblem<dim>::output_results(const unsigned int cycle) const {
     std::vector<std::string> solution_names(dim, "velocity");
@@ -846,6 +945,11 @@ namespace CRF {
   }
 
 
+  // A simple mesh refinement criterion. The Kelly error estimator is applied to each block solution. In so doing,
+  // the interpolation error is quantified. This will not indicate the true error of the problem, but high interpolation
+  // error is a good indication of high ``true" error, so a good place to refine the mesh. The interpolation error
+  // for each block is summed and the 30% highest error cells are refined (plus potentially others to preserve a difference
+  // of at most 1 refinement level for neighboring cells).
   template<int dim>
   void CRFProblem<dim>::refine_mesh() {
     Vector<float> estimated_error_per_cell(triangulation.n_active_cells());
